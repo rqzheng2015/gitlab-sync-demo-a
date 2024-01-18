@@ -1,0 +1,80 @@
+stages:
+  - build
+  - update
+
+build:
+  stage: build
+  script:
+    - echo "Install dependencies"
+    - pnpm i
+    - echo "Building..."
+    - pnpm build
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      changes:
+        - 'src/**/*'
+      when: on_success
+  # 这里需要保留生成的dist产物，update阶段需要用到
+  # 不使用artifacts保存的话，产物会在build阶段结束后被清理掉
+  # Here we need to keep the generated dist artifacts, which are needed in the update stage
+  # If we don't save artifacts, the artifacts will be cleaned up after the build stage ends
+  artifacts:
+    paths:
+      - dist/**/*
+
+update:
+  stage: update
+  # 在更新之前需要执行build操作
+  # The build stage needs to be performed before the update
+  needs: [ "build" ]
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+      changes:
+        - 'src/**/*'
+      when: on_success
+  # 这里需要换ubuntu淘宝的源，不然国内的gitlab runner可能安装不了jq
+  # Here we need to switch to the Chinese mirror of Ubuntu, otherwise the gitlab runner might not be able to install jq.
+
+  before_script:
+    - echo "Setting up Chinese mirror for apt-get"
+    - echo "deb http://mirrors.aliyun.com/ubuntu/ focal main restricted universe multiverse" > /etc/apt/sources.list
+    - echo "deb http://mirrors.aliyun.com/ubuntu/ focal-security main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb http://mirrors.aliyun.com/ubuntu/ focal-updates main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb http://mirrors.aliyun.com/ubuntu/ focal-proposed main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb http://mirrors.aliyun.com/ubuntu/ focal-backports main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb-src http://mirrors.aliyun.com/ubuntu/ focal main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb-src http://mirrors.aliyun.com/ubuntu/ focal-security main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb-src http://mirrors.aliyun.com/ubuntu/ focal-updates main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb-src http://mirrors.aliyun.com/ubuntu/ focal-proposed main restricted universe multiverse" >> /etc/apt/sources.list
+    - echo "deb-src http://mirrors.aliyun.com/ubuntu/ focal-backports main restricted universe multiverse" >> /etc/apt/sources.list
+    - apt-get update -y && apt-get install -y jq
+  script:
+    - echo "Updating repository B"
+    # 克隆仓库b到本地
+    # Clone repository B to local
+    - git clone -b main https://oauth2:$REPO_B_GITLAB_TOKEN@<your gitlab host>/<your gitlab namespace>/gitlab-sync-demo-b.git b
+    - mkdir -p b/src/dist-a
+    # 将a仓库的产物拷贝到b仓库的src目录下的指定位置
+    # Copy the artifacts of repository A to the specified location in the src directory of repository B
+    - cp -r dist/* b/src/dist-a
+    - cd b
+    # 这里需要指定git的用户名和邮箱，不然提交不了代码
+    # Here you need to specify the username and email of git, otherwise you cannot commit the code
+    - git config user.email "<your email account>"
+    - git config user.name "<your gitlab username>"
+    - branch_name="sync-$(date +'%Y-%m-%d-%H-%M-%S')"
+    # 这里填写需要提交PR的B仓库id，仓库id可以在gitlab仓库首页看到
+    # Here you need to fill in the B repository id that needs to submit PR,
+    # the repository id can be seen on the gitlab repository homepage
+    - repo_id="<your repo id>"
+    - git checkout -b $branch_name
+    # 以下的步骤，只会提交跟原有b仓库有修改的代码，避免了全量提交
+    # The following steps will only commit code that has been modified from the original B repository, avoiding full submission
+    - git add .
+    - git commit -m "Update dist files from 'demo-a'"
+    - git push origin $branch_name
+    # 这里提交了一个PR给仓库B，并且在成功后通过jq解析出来web_url字段，
+    # 可以供开发者在日志快速打开merge request的地址
+    # Here a PR is submitted to repository B, and when PR is merged successfully, the web_url field is parsed out through jq,
+    # which can provide the merge request address to the developers quickly to open it in the console
+    - "merge_request_response=$(curl --silent --header 'PRIVATE-TOKEN: '$REPO_B_GITLAB_TOKEN -X POST 'https://<your gitlab host>/api/v4/projects/'$repo_id'/merge_requests' -F 'source_branch='$branch_name -F 'target_branch=main' -F 'title=Update dist files from demo-a' -F 'description=Automated PR for updating dist files' -F 'remove_source_branch=true' -F 'squash=true'); if [ $? -eq 0 ]; then echo $merge_request_response | jq -r '.web_url'; else echo $merge_request_response | jq -r '.message'; fi"
